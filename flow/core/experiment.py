@@ -180,6 +180,9 @@ class Experiment:
 
         print("Total time:", time.time() - t)
         print("steps/second:", np.mean(times))
+        if hasattr(self.env, "summarize_metrics"):
+            self.env.summarize_metrics()
+
         self.env.terminate()
 
         return info_dict

@@ -57,12 +57,12 @@ if __name__ == "__main__":
     flags = parse_args(sys.argv[1:])
 
     # Get the flow_params object.
-    module = __import__("exp_configs.non_rl", fromlist=[flags.exp_config])
-    flow_params = getattr(module, flags.exp_config).flow_params
+    module = __import__(flags.exp_config, fromlist=[""])
+    flow_params = module.flow_params
 
     # Get the custom callables for the runner.
-    if hasattr(getattr(module, flags.exp_config), "custom_callables"):
-        callables = getattr(module, flags.exp_config).custom_callables
+    if hasattr(module, "custom_callables"):
+        callables = module.custom_callables
     else:
         callables = None
 
