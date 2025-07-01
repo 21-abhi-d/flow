@@ -17,7 +17,7 @@ class FleetManagerEnv(Env):
         self.manager = FleetManagerAgent()
         self.active_requests = []
         self.req_id_counter = 0
-        self.request_rate = 1.0
+        self.request_rate = 0.1
         
         self.time_counter = 0
         self.request_spawn_times = {}     # request_id -> time
@@ -25,6 +25,8 @@ class FleetManagerEnv(Env):
         self.metrics_log = [] 
         self.completed_requests = []
         self.request_slots = [None] * 50
+        
+        self.num_vehicles = 20
         
         
     @property
@@ -190,8 +192,8 @@ class FleetManagerEnv(Env):
             self.request_spawn_times[self.req_id_counter] = self.time_counter
             self.req_id_counter += 1
 
-        # Spawn at least 5 RL vehicles
-        for i in range(5):
+        # Spawn vehicles
+        for i in range(self.num_vehicles):
             veh_id = f"rl_{i}"
             if veh_id not in self.k.vehicle.get_ids():
                 try:
@@ -257,10 +259,6 @@ class FleetManagerEnv(Env):
                         self.request_spawn_times[request["id"]] = self.time_counter
                         print(f"[Spawn] New request: {request}")
                         self.active_requests.append(request)
-                        # for i in range(len(self.request_slots)):
-                        #     if self.request_slots[i] is None:
-                        #         self.request_slots[i] = request
-                        #         break
                         self.req_id_counter += 1
                     else:
                         print(f"[WARN] Empty shape for lane {lane_id}")
@@ -279,39 +277,42 @@ class FleetManagerEnv(Env):
         }
         print(f"[ASSIGN] Vehicle {vehicle_id} assigned to {req_id}, dropoff at {current_time + trip_duration}")
 
+    
     def _dispatch_actions(self, assignments):
         for vehicle_id, req_id in assignments.items():
             self.manager.assign_vehicle_to_request(vehicle_id, req_id, self.time_counter)
-            # print(f"[DEBUG] current_time passed: {current_time}, self.time_counter: {self.time_counter}")
     
     
-    def apply_actions(self, rl_actions):
-        assignments = {}
+    def apply_actions(self, assignments):
+        """
+        Apply a mapping of vehicle_id → request_id.
+        """
+        for vehicle_id, req_id in assignments.items():
+            req = next((r for r in self.active_requests if r["id"] == req_id), None)
+            if req is None:
+                print(f"[WARN] Request {req_id} not found in active_requests")
+                continue
 
-        # Get up to 20 idle vehicles (in consistent order)
-        idle_vehicles = [
-            vid for vid in sorted(self.k.vehicle.get_ids())
-            if self.manager.busy_until.get(vid, 0) <= self.time_counter
-        ]
+            self.request_assign_times[req_id] = self.time_counter
 
-        # Interpret RL action vector
-        for i, vehicle_id in enumerate(idle_vehicles[:20]):
-            raw_action = int(rl_actions[i])
-            req_idx = raw_action - 1  # shift: 0 = idle, 1..50 = req_slots[0..49]
+            # Estimate pickup and dropoff times
+            veh_pos = self.vehicles[vehicle_id]["pos"]
+            pickup_dist = ((veh_pos[0] - req["pos"][0])**2 + (veh_pos[1] - req["pos"][1])**2) ** 0.5
+            AVERAGE_SPEED = 10
+            pickup_time = int(pickup_dist / AVERAGE_SPEED)
+            trip_duration = random.randint(20, 60)
+            dropoff_time = self.time_counter + pickup_time + trip_duration
 
-            if 0 <= req_idx < len(self.request_slots):
-                req = self.request_slots[req_idx]
-                if req is not None:
-                    assignments[vehicle_id] = req["id"]
-                    self.request_assign_times[req["id"]] = self.time_counter
-                    self.request_slots[req_idx] = None
-            print(f"[DEBUG] raw_action: {raw_action}, req_idx: {req_idx}, req: {req}")
+            self.manager.busy_until[vehicle_id] = dropoff_time
+            self.manager.active_trips[vehicle_id] = {
+                "request_id": req_id,
+                "dropoff_time": dropoff_time
+            }
 
-        
-        # Call the existing logic for applying dispatches
-        self._dispatch_actions(assignments)
+            print(f"[Dispatch] Assigned {vehicle_id} to {req_id} "
+                f"(pickup in {pickup_time}s, drop-off at {dropoff_time})")
 
-        # Remove assigned requests from active queue
+        # Remove assigned requests from active list
         assigned_ids = set(assignments.values())
         self.active_requests = [
             req for req in self.active_requests if req["id"] not in assigned_ids
@@ -324,7 +325,7 @@ class FleetManagerEnv(Env):
         max_requests = 50
         max_vehicles = 20
         # Add 2 to handle -1 offset (shift range to 0–50 internally)
-        return MultiDiscrete([max_requests + 2] * max_vehicles)
+        return MultiDiscrete([max_requests + 2] * self.num_vehicles)
     
     def _apply_rl_actions(self, rl_actions):
         """
@@ -338,6 +339,13 @@ class FleetManagerEnv(Env):
         # DEBUG: Inspect request slots
         for idx, r in enumerate(self.request_slots):
             print(f"[DEBUG] SLOT {idx}: {r['id'] if r else 'None'}")
+            
+        # Cleanup finished trips first
+        for veh_id, dropoff_time in list(self.manager.busy_until.items()):
+            if dropoff_time <= self.time_counter:
+                print(f"[INFO] Vehicle {veh_id} is now idle.")
+                del self.manager.busy_until[veh_id]
+                del self.manager.active_trips[veh_id]
             
         idle_vehicles = {
             vid: v for vid, v in self.vehicles.items()

@@ -30,7 +30,7 @@ def make_env():
                 lane_change_mode=0,
                 model="SL2015"
             ),
-            num_vehicles=5
+            num_vehicles=100
         )
 
         env_params = EnvParams()
@@ -68,7 +68,7 @@ def make_env():
 env = DummyVecEnv([make_env()])
 
 # Train the PPO agent
-model = PPO("MlpPolicy", env, verbose=1)
+model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_tensorboard/")
 model.learn(total_timesteps=10000)
 
 # Save the trained model

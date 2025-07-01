@@ -31,7 +31,7 @@ vehicles.add(
         speed_mode="obey_safe_speed",
     ),
     initial_speed=0,
-    num_vehicles=1)
+    num_vehicles=20)
 
 
 flow_params = dict(
