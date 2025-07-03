@@ -4,6 +4,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import DummyVecEnv
 from gym.wrappers import FlattenObservation
+from log_callback import RewardLoggingCallback
 
 # Make sure your env is importable
 from flow.envs.fleet_manager_env import FleetManagerEnv
@@ -67,9 +68,11 @@ def make_env():
 # Wrap in vectorized environment
 env = DummyVecEnv([make_env()])
 
+callback = RewardLoggingCallback()
+
 # Train the PPO agent
 model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_tensorboard/")
-model.learn(total_timesteps=10000)
+model.learn(total_timesteps=10000, callback=callback)
 
 # Save the trained model
 model.save("fleet_manager_model")

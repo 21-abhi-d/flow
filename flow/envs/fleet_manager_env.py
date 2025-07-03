@@ -82,7 +82,8 @@ class FleetManagerEnv(Env):
             self.apply_actions(assignments)
         # elif Decision by LLM:
         # logic
-
+        
+        completed_this_step = 0
         to_remove = []
         for vid, trip in self.manager.active_trips.items():
             if self.time_counter >= trip["dropoff_time"]:
@@ -107,8 +108,9 @@ class FleetManagerEnv(Env):
                     "assign_time": assign_time,
                     "dropoff_time": self.time_counter,
                     "wait_time": wait_time,
-                    "total_time": total_time
+                    "total_time": total_time,
                 })
+                completed_this_step += 1
 
                 print(f"[Complete] Vehicle {vid} completed request {req_id} (wait: {wait_time}, total: {total_time})")
                 to_remove.append(vid)
@@ -149,9 +151,17 @@ class FleetManagerEnv(Env):
         avg_wait_time = sum(wait_times) / len(wait_times) if wait_times else 0
         num_assigned = len(assignments)
 
-        reward = -avg_wait_time + 0.1 * num_assigned
+        # NEEDS MODIFICATION
+        normalized_completed = completed_this_step / 10.0
+        normalized_wait_time = avg_wait_time / 100.0
+        normalized_active_requests = len(self.active_requests) / 100.0
 
-        # 🔍 Check reward for invalid values
+        reward = (
+            1.0 * normalized_completed
+            - 0.5 * normalized_wait_time
+            - 0.5 * normalized_active_requests
+        )
+
         if np.isnan(reward) or np.isinf(reward):
             print("[ERROR] Reward is NaN or Inf! Resetting to 0.")
             reward = 0.0
@@ -166,6 +176,11 @@ class FleetManagerEnv(Env):
         self.metrics_log.append(step_metrics)
 
         print(f"[Metrics] {step_metrics}")
+        
+        done = False
+        if self.time_counter >= self.env_params.horizon:
+            print(f"[DONE] Reached episode horizon {self.env_params.horizon}, ending episode.")
+            done = True
         return obs, reward, done, info
 
     def reset(self):
@@ -212,7 +227,7 @@ class FleetManagerEnv(Env):
                     print(f"[WARN] Vehicle add failed for {veh_id}: {e}")
 
         obs = self.get_state()
-        print(f"[DEBUG] reset(): state shape = {obs.shape}, first 10 vals: {obs[:10]}")
+        print(f"[DEBUG] reset(): state shape = {obs.shape}, first 10 vals: {obs[:10]}")        
         return obs
 
     def get_vehicle_states(self):
@@ -267,15 +282,43 @@ class FleetManagerEnv(Env):
 
         return self.active_requests
 
+    # def assign_vehicle_to_request(self, vehicle_id, req_id, current_time):
+    #     trip_duration = 5
+    #     # trip_duration = int(np.linalg.norm(np.array(req["pos"]) - np.array(veh["pos"])) / speed)
+    #     self.busy_until[vehicle_id] = current_time + trip_duration
+    #     self.active_trips[vehicle_id] = {
+    #         "request_id": req_id,
+    #         "dropoff_time": current_time + trip_duration
+    #     }
+    #     print(f"[ASSIGN] Vehicle {vehicle_id} assigned to {req_id}, dropoff at {current_time + trip_duration}")
+        
     def assign_vehicle_to_request(self, vehicle_id, req_id, current_time):
-        trip_duration = 5
-        # trip_duration = int(np.linalg.norm(np.array(req["pos"]) - np.array(veh["pos"])) / speed)
+        # Get vehicle position
+        veh_pos = self.k.vehicle.get_position(vehicle_id)  # returns (x, y)
+        
+        # Get request position
+        request = next((r for r in self.env.requests if r["id"] == req_id), None)
+        if request is None:
+            print(f"[ERROR] Request {req_id} not found.")
+            return
+
+        req_pos = request["pos"]  # assumes format (x, y)
+
+        # Compute Euclidean distance
+        distance = np.linalg.norm(np.array(veh_pos) - np.array(req_pos))
+
+        # Estimate trip duration: distance / speed
+        speed = 10.0  # m/s or km/h depending on your simulation scale
+        trip_duration = max(1, int(distance / speed))  # prevent 0 duration
+
+        # Register assignment
         self.busy_until[vehicle_id] = current_time + trip_duration
         self.active_trips[vehicle_id] = {
             "request_id": req_id,
             "dropoff_time": current_time + trip_duration
         }
-        print(f"[ASSIGN] Vehicle {vehicle_id} assigned to {req_id}, dropoff at {current_time + trip_duration}")
+
+        print(f"[ASSIGN] Vehicle {vehicle_id} assigned to {req_id}, dist={distance:.2f}, dropoff at {current_time + trip_duration}")
 
     
     def _dispatch_actions(self, assignments):
@@ -337,8 +380,8 @@ class FleetManagerEnv(Env):
         assignments = {}
         
         # DEBUG: Inspect request slots
-        for idx, r in enumerate(self.request_slots):
-            print(f"[DEBUG] SLOT {idx}: {r['id'] if r else 'None'}")
+        # for idx, r in enumerate(self.request_slots):
+        #     print(f"[DEBUG] SLOT {idx}: {r['id'] if r else 'None'}")
             
         # Cleanup finished trips first
         for veh_id, dropoff_time in list(self.manager.busy_until.items()):
