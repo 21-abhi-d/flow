@@ -1,3 +1,4 @@
+
 import gym
 import numpy as np
 from stable_baselines3 import PPO
@@ -34,7 +35,7 @@ def make_env():
             num_vehicles=100
         )
 
-        env_params = EnvParams()
+        env_params = EnvParams(additional_params={"num_vehicles": 100})
         sim_params = SimParams()
         sim_params.render = False
         sim_params.sim_step = 0.1
@@ -71,8 +72,17 @@ env = DummyVecEnv([make_env()])
 callback = RewardLoggingCallback()
 
 # Train the PPO agent
-model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_tensorboard/")
-model.learn(total_timesteps=10000, callback=callback)
 
-# Save the trained model
+model = PPO(
+    "MlpPolicy",
+    env,
+    verbose=1,
+    tensorboard_log="./ppo_tensorboard/",
+    learning_rate=0.0001,
+    clip_range=0.1,
+    ent_coef=0.01,
+    vf_coef=0.5
+)
+
+model.learn(total_timesteps=10000, callback=callback)
 model.save("fleet_manager_model")

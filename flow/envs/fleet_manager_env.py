@@ -17,7 +17,7 @@ class FleetManagerEnv(Env):
         self.manager = FleetManagerAgent()
         self.active_requests = []
         self.req_id_counter = 0
-        self.request_rate = 0.1
+        self.request_rate = 0.02
         
         self.time_counter = 0
         self.request_spawn_times = {}     # request_id -> time
@@ -26,17 +26,18 @@ class FleetManagerEnv(Env):
         self.completed_requests = []
         self.request_slots = [None] * 50
         
-        self.num_vehicles = 20
+        self.num_vehicles = env_params.additional_params.get("num_vehicles", 100)
         
         
     @property
     def observation_space(self):
-        return Box(low=0.0, high=1e3, shape=(210,), dtype=np.float32)
+        return Box(low=0.0, high=1e3, shape=(310,), dtype=np.float32)
 
     def step(self, rl_actions=None):
         print("\n[DEBUG] Vehicle busy status:")
         for vid in self.k.vehicle.get_ids():
-            print(f" - {vid}: busy_until={self.manager.busy_until.get(vid, 0)}, time={self.time_counter}")
+            # print(f" - {vid}: busy_until={self.manager.busy_until.get(vid, 0)}, time={self.time_counter}")
+            continue
         self.request_slots = self.active_requests[:50]
         # Update kernel (required in every step)
         self.k.update(reset=False)
@@ -71,7 +72,8 @@ class FleetManagerEnv(Env):
             print("[DEBUG] Using RL agent to assign requests")
             for idx, req in enumerate(self.request_slots):
                 if req is not None:
-                    print(f"[SLOT DEBUG] Slot {idx}: req_id={req['id']}, time={req['time']}, pos={req['pos']}")
+                    # print(f"[SLOT DEBUG] Slot {idx}: req_id={req['id']}, time={req['time']}, pos={req['pos']}")
+                    continue
             assignments = self._apply_rl_actions(rl_actions)
         else:
             # Default: use rule-based manager
@@ -153,13 +155,13 @@ class FleetManagerEnv(Env):
 
         # NEEDS MODIFICATION
         normalized_completed = completed_this_step / 10.0
+        normalized_assigned = num_assigned / 10.0
         normalized_wait_time = avg_wait_time / 100.0
-        normalized_active_requests = len(self.active_requests) / 100.0
 
         reward = (
             1.0 * normalized_completed
-            - 0.5 * normalized_wait_time
-            - 0.5 * normalized_active_requests
+            + 0. * normalized_assigned
+            - 0.05 * normalized_wait_time
         )
 
         if np.isnan(reward) or np.isinf(reward):
@@ -187,6 +189,7 @@ class FleetManagerEnv(Env):
         super().reset()
         self.k.update(reset=True)
 
+        # Reset counters and logs
         self.time_counter = 0
         self.req_id_counter = 0
         self.active_requests = []
@@ -194,8 +197,23 @@ class FleetManagerEnv(Env):
         self.request_assign_times = {}
         self.completed_requests = []
         self.metrics_log = []
+        
+        print(f"[RESET] Cleared all request-related state.")
 
-        # Spawn 5 fake requests
+        # Clear internal agent state
+        self.manager.busy_until.clear()
+
+        # Register all rl_ vehicles present in the simulation
+        final_vehicles = [vid for vid in self.k.vehicle.get_ids() if vid.startswith("rl_")]
+        assert len(final_vehicles) == self.num_vehicles, (
+            f"[ERROR] Expected {self.num_vehicles} vehicles, but found {len(final_vehicles)}"
+        )
+        for vid in final_vehicles:
+            self.manager.busy_until[vid] = 0
+
+        print(f"[RESET] Vehicle manager state initialized for {len(final_vehicles)} vehicles.")
+        
+        # Spawn 5 initial requests
         for _ in range(5):
             x = np.random.uniform(100, 900)
             y = np.random.uniform(100, 900)
@@ -207,27 +225,9 @@ class FleetManagerEnv(Env):
             self.request_spawn_times[self.req_id_counter] = self.time_counter
             self.req_id_counter += 1
 
-        # Spawn vehicles
-        for i in range(self.num_vehicles):
-            veh_id = f"rl_{i}"
-            if veh_id not in self.k.vehicle.get_ids():
-                try:
-                    self.k.vehicle.add(
-                        veh_id=veh_id,
-                        type_id="rl",
-                        edge="e_10",  # replace with valid edge
-                        lane=0,
-                        pos="0",
-                        speed=0
-                    )
-                    self.manager.busy_until[veh_id] = 0
-                    
-                    print(f"[RESET DEBUG] Vehicles after spawn: {self.k.vehicle.get_ids()}")
-                except Exception as e:
-                    print(f"[WARN] Vehicle add failed for {veh_id}: {e}")
-
+        print(f"[RESET] Spawned {len(self.active_requests)} initial requests. Current req_ids: {[r['id'] for r in self.active_requests]}")
         obs = self.get_state()
-        print(f"[DEBUG] reset(): state shape = {obs.shape}, first 10 vals: {obs[:10]}")        
+        print(f"[DEBUG] reset(): state shape = {obs.shape}, first 10 vals: {obs[:10]}")
         return obs
 
     def get_vehicle_states(self):
@@ -273,7 +273,11 @@ class FleetManagerEnv(Env):
                         }
                         self.request_spawn_times[request["id"]] = self.time_counter
                         print(f"[Spawn] New request: {request}")
-                        self.active_requests.append(request)
+                        MAX_ACTIVE_REQUESTS = 50  # place this at class level if you prefer
+                        if len(self.active_requests) < MAX_ACTIVE_REQUESTS:
+                            self.active_requests.append(request)
+                        else:
+                            print(f"[SKIP] Reached request cap ({MAX_ACTIVE_REQUESTS}) — not spawning new request.")
                         self.req_id_counter += 1
                     else:
                         print(f"[WARN] Empty shape for lane {lane_id}")
@@ -281,16 +285,6 @@ class FleetManagerEnv(Env):
                     print(f"[ERROR] Failed to get position for {edge_id}: {e}")
 
         return self.active_requests
-
-    # def assign_vehicle_to_request(self, vehicle_id, req_id, current_time):
-    #     trip_duration = 5
-    #     # trip_duration = int(np.linalg.norm(np.array(req["pos"]) - np.array(veh["pos"])) / speed)
-    #     self.busy_until[vehicle_id] = current_time + trip_duration
-    #     self.active_trips[vehicle_id] = {
-    #         "request_id": req_id,
-    #         "dropoff_time": current_time + trip_duration
-    #     }
-    #     print(f"[ASSIGN] Vehicle {vehicle_id} assigned to {req_id}, dropoff at {current_time + trip_duration}")
         
     def assign_vehicle_to_request(self, vehicle_id, req_id, current_time):
         # Get vehicle position
@@ -464,6 +458,9 @@ class FleetManagerEnv(Env):
     def get_state(self):
         max_vehicles = 20
         max_requests = 50
+        grid_size = 10
+        grid_dim = 1000  # assuming 0–1000 space
+        cell_width = grid_dim / grid_size
 
         vehicle_obs = []
         for vid in sorted(self.k.vehicle.get_ids())[:max_vehicles]:
@@ -477,9 +474,9 @@ class FleetManagerEnv(Env):
         while len(vehicle_obs) < max_vehicles:
             vehicle_obs.append([0.0, 0.0, 0.0])
 
-        # self.request_slots = self.active_requests[:max_requests]
-
         request_obs = []
+        demand_grid = np.zeros((grid_size, grid_size), dtype=np.float32)
+
         for req in self.request_slots:
             if req is None:
                 request_obs.append([0.0, 0.0, 0.0])
@@ -490,11 +487,20 @@ class FleetManagerEnv(Env):
                     x, y, age = 0.0, 0.0, 0.0
                 request_obs.append([x, y, float(age)])
 
+                # Add to demand grid
+                col = min(int(x / cell_width), grid_size - 1)
+                row = min(int(y / cell_width), grid_size - 1)
+                demand_grid[row][col] += 1
+
         while len(request_obs) < max_requests:
             request_obs.append([0.0, 0.0, 0.0])
 
-        flat_state = [val for sublist in (vehicle_obs + request_obs) for val in sublist]
-        obs = np.array(flat_state, dtype=np.float32)
+        # Flatten everything
+        flat_vehicle = [val for sublist in vehicle_obs for val in sublist]
+        flat_request = [val for sublist in request_obs for val in sublist]
+        flat_demand = demand_grid.flatten().tolist()  # Now 100 values
+
+        obs = np.array(flat_vehicle + flat_request + flat_demand, dtype=np.float32)
 
         obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
         obs = np.clip(obs, -1e3, 1e3)
