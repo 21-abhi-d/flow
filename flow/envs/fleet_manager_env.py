@@ -4,6 +4,7 @@ from examples.run_fleet_manager import run as run_fleet_manager
 from gym.spaces import Box, MultiDiscrete, Discrete
 import numpy as np
 from collections import deque
+from torch.utils.tensorboard import SummaryWriter
 
 import random
 
@@ -28,6 +29,7 @@ class FleetManagerEnv(Env):
         self.request_slots = [None] * 50
         
         self.num_vehicles = env_params.additional_params.get("num_vehicles", 15)
+        self.writer = SummaryWriter(log_dir="./ppo_tensorboard/")
         
         
     @property
@@ -154,17 +156,28 @@ class FleetManagerEnv(Env):
         ]
         avg_wait_time = sum(wait_times) / len(wait_times) if wait_times else 0
         num_assigned = len(assignments)
+        
+        self.writer.add_scalar("custom/avg_wait_time", avg_wait_time, self.time_counter)
 
-        # NEEDS MODIFICATION
         normalized_completed = completed_this_step / 10.0
         normalized_assigned = num_assigned / 10.0
-        normalized_wait_time = avg_wait_time / 60.0
+        normalized_wait_time = avg_wait_time / 60.0  # ranges from ~2 to 3+
 
-        reward = (
-            1.0 * normalized_completed
-            + 1.0 * normalized_assigned
-            - 0.05 * normalized_wait_time
-        )
+        # Step 1: Base reward without wait-time penalty
+        base_reward = 1.0 * normalized_completed + 0.5 * normalized_assigned
+
+        # Step 2: Apply wait time constraint as a **multiplier penalty**
+        # If avg_wait_time > 150s, the multiplier decreases, squashing reward
+        if avg_wait_time > 150:
+            wait_multiplier = max(0.0, 1.0 - ((avg_wait_time - 150) / 60))  # drops from 1 to 0 as wait hits 210
+        else:
+            wait_multiplier = 1.0
+
+        # Step 3: Compute total reward with wait time constraint
+        reward = base_reward * wait_multiplier
+
+        # Step 4 (optional): Add a small extra penalty for high wait time
+        reward -= 0.05 * normalized_wait_time
 
         if np.isnan(reward) or np.isinf(reward):
             print("[ERROR] Reward is NaN or Inf! Resetting to 0.")
