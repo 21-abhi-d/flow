@@ -32,10 +32,10 @@ def make_env():
                 lane_change_mode=0,
                 model="SL2015"
             ),
-            num_vehicles=100
+            num_vehicles=15
         )
 
-        env_params = EnvParams(additional_params={"num_vehicles": 100})
+        env_params = EnvParams(additional_params={"num_vehicles": 15})
         sim_params = SimParams()
         sim_params.render = False
         sim_params.sim_step = 0.1
@@ -84,5 +84,5 @@ model = PPO(
     vf_coef=0.5
 )
 
-model.learn(total_timesteps=10000, callback=callback)
+model.learn(total_timesteps=50000, callback=callback)
 model.save("fleet_manager_model")
