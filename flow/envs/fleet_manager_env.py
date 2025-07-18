@@ -30,7 +30,40 @@ class FleetManagerEnv(Env):
         
         self.num_vehicles = env_params.additional_params.get("num_vehicles", 15)
         self.writer = SummaryWriter(log_dir="./ppo_tensorboard/")
-        
+    
+    def move_vehicle(self, vehicle_id, direction, delta=20.0):
+        pos = self.k.vehicle.get_position(vehicle_id)
+
+        # Fallback if position is missing or scalar (e.g., lanepos only)
+        if not isinstance(pos, (tuple, list)):
+            pos = (float(pos), 0.0)
+
+        if len(pos) != 2:
+            print(f"[WARN] Cannot move vehicle {vehicle_id}: invalid position {pos}")
+            return
+
+        x, y = pos
+
+        if direction == 1:  # up (increase y)
+            y += delta
+        elif direction == 2:  # down
+            y -= delta
+        elif direction == 3:  # left
+            x -= delta
+        elif direction == 4:  # right
+            x += delta
+        elif direction == 0 or direction == -1:
+            # direction 0 or -1 = idle/no-op
+            return
+        else:
+            print(f"[WARN] Unknown direction {direction} for vehicle {vehicle_id}")
+            return
+
+        try:
+            self.k.vehicle.move_to_xy(vehicle_id, x, y)
+            print(f"[MOVE] Vehicle {vehicle_id} moved to ({x:.1f}, {y:.1f})")
+        except Exception as e:
+            print(f"[ERROR] Could not move {vehicle_id} to ({x:.1f}, {y:.1f}): {e}")
         
     @property
     def observation_space(self):
@@ -374,19 +407,13 @@ class FleetManagerEnv(Env):
     
     @property
     def action_space(self):
-        # 0 = stay idle, 1 = serve the oldest unassigned request
-        return MultiDiscrete([2] * self.num_vehicles)
+        # 0 = stay, 1 = up, 2 = down, 3 = left, 4 = right, 5 = serve
+        return MultiDiscrete([6] * self.num_vehicles)
     
     def _apply_rl_actions(self, rl_actions):
-        """
-        RL assigns vehicles to serve the oldest requests first (FIFO), or stay idle.
-        Each action is 0 (idle) or 1 (serve oldest available).
-        """
         print(f"[DEBUG] RL Actions received: {rl_actions}")
-
         assignments = {}
 
-        # Cleanup finished trips
         for veh_id, dropoff_time in list(self.manager.busy_until.items()):
             if dropoff_time <= self.time_counter:
                 print(f"[INFO] Vehicle {veh_id} is now idle.")
@@ -401,16 +428,19 @@ class FleetManagerEnv(Env):
         print(f"[DEBUG] Idle vehicles: {list(idle_vehicles.keys())}")
 
         veh_ids = list(idle_vehicles.keys())
-        unassigned_requests = list(self.active_requests)  # FIFO: oldest at front
+        unassigned_requests = list(self.active_requests)
         req_idx = 0
 
         for i, veh_id in enumerate(veh_ids):
             if i >= len(rl_actions):
                 break
-            if rl_actions[i] == 1:
+
+            action = rl_actions[i]
+
+            if action == 5:
                 if req_idx >= len(unassigned_requests):
                     print(f"[SKIP] No more requests to assign.")
-                    break
+                    continue
                 req = unassigned_requests[req_idx]
                 req_idx += 1
 
@@ -419,8 +449,7 @@ class FleetManagerEnv(Env):
 
                 veh_pos = idle_vehicles[veh_id]["pos"]
                 pickup_dist = ((veh_pos[0] - req["pos"][0])**2 + (veh_pos[1] - req["pos"][1])**2) ** 0.5
-                AVERAGE_SPEED = 10  # m/s
-                pickup_time = int(pickup_dist / AVERAGE_SPEED)
+                pickup_time = int(pickup_dist / 10)
                 trip_duration = random.randint(20, 60)
                 dropoff_time = self.time_counter + pickup_time + trip_duration
 
@@ -430,7 +459,9 @@ class FleetManagerEnv(Env):
                     "dropoff_time": dropoff_time
                 }
 
-                print(f"[RL Dispatch] Assigned {veh_id} to {req['id']} -> pickup in {pickup_time}s, drop-off at t={dropoff_time}")
+                print(f"[RL Dispatch] Assigned {veh_id} to {req['id']} -> drop-off at {dropoff_time}")
+            elif action in [1, 2, 3, 4]:
+                self.move_vehicle(veh_id, direction=action)
             else:
                 print(f"[SKIP] Vehicle {veh_id} chose to stay idle")
 
