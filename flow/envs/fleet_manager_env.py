@@ -3,6 +3,8 @@ from flow.fleet_manager.rule_based_manager import FleetManagerAgent
 from examples.run_fleet_manager import run as run_fleet_manager
 from gym.spaces import Box, MultiDiscrete, Discrete
 import numpy as np
+from collections import deque
+from torch.utils.tensorboard import SummaryWriter
 
 import random
 
@@ -15,9 +17,9 @@ class FleetManagerEnv(Env):
         super().__init__(env_params, sim_params, network, simulator)
         
         self.manager = FleetManagerAgent()
-        self.active_requests = []
+        self.active_requests = deque()
         self.req_id_counter = 0
-        self.request_rate = 0.02
+        self.request_rate = 0.35
         
         self.time_counter = 0
         self.request_spawn_times = {}     # request_id -> time
@@ -26,7 +28,8 @@ class FleetManagerEnv(Env):
         self.completed_requests = []
         self.request_slots = [None] * 50
         
-        self.num_vehicles = env_params.additional_params.get("num_vehicles", 100)
+        self.num_vehicles = env_params.additional_params.get("num_vehicles", 15)
+        self.writer = SummaryWriter(log_dir="./ppo_tensorboard/")
         
         
     @property
@@ -38,7 +41,7 @@ class FleetManagerEnv(Env):
         for vid in self.k.vehicle.get_ids():
             # print(f" - {vid}: busy_until={self.manager.busy_until.get(vid, 0)}, time={self.time_counter}")
             continue
-        self.request_slots = self.active_requests[:50]
+        self.request_slots = list(self.active_requests)[:50]
         # Update kernel (required in every step)
         self.k.update(reset=False)
 
@@ -51,7 +54,7 @@ class FleetManagerEnv(Env):
         # Get vehicle states and active ride requests
         self.vehicles = self.get_vehicle_states()
         self.requests = self.get_active_requests()
-        self.request_slots = self.active_requests[:50]
+        self.request_slots = list(self.active_requests)[:50]
         
         for vid in list(self.manager.busy_until.keys()):
             if self.manager.busy_until[vid] <= self.time_counter:
@@ -65,7 +68,6 @@ class FleetManagerEnv(Env):
                 # del self.manager.active_trips[vid]
 
         assignments = {}
-        unassigned_requests = self.requests
 
         if rl_actions is not None:
             # Use RL output to decide assignments
@@ -82,6 +84,7 @@ class FleetManagerEnv(Env):
             for req_id in assignments.values():
                 self.request_assign_times[req_id] = self.time_counter
             self.apply_actions(assignments)
+            unassigned_requests = self.requests
         # elif Decision by LLM:
         # logic
         
@@ -124,7 +127,8 @@ class FleetManagerEnv(Env):
             print(f"[IDLE] Vehicle {vid} is now idle again at t={self.time_counter}")
 
         # Remove served requests
-        self.active_requests = unassigned_requests
+        if rl_actions is None:
+            self.active_requests = unassigned_requests
 
         # Default return values
         done = False
@@ -152,17 +156,28 @@ class FleetManagerEnv(Env):
         ]
         avg_wait_time = sum(wait_times) / len(wait_times) if wait_times else 0
         num_assigned = len(assignments)
+        
+        self.writer.add_scalar("custom/avg_wait_time", avg_wait_time, self.time_counter)
 
-        # NEEDS MODIFICATION
         normalized_completed = completed_this_step / 10.0
         normalized_assigned = num_assigned / 10.0
-        normalized_wait_time = avg_wait_time / 100.0
+        normalized_wait_time = avg_wait_time / 60.0  # ranges from ~2 to 3+
 
-        reward = (
-            1.0 * normalized_completed
-            + 0. * normalized_assigned
-            - 0.05 * normalized_wait_time
-        )
+        # Step 1: Base reward without wait-time penalty
+        base_reward = 1.0 * normalized_completed + 0.5 * normalized_assigned
+
+        # Step 2: Apply wait time constraint as a **multiplier penalty**
+        # If avg_wait_time > 150s, the multiplier decreases, squashing reward
+        if avg_wait_time > 150:
+            wait_multiplier = max(0.0, 1.0 - ((avg_wait_time - 150) / 60))  # drops from 1 to 0 as wait hits 210
+        else:
+            wait_multiplier = 1.0
+
+        # Step 3: Compute total reward with wait time constraint
+        reward = base_reward * wait_multiplier
+
+        # Step 4 (optional): Add a small extra penalty for high wait time
+        reward -= 0.05 * normalized_wait_time
 
         if np.isnan(reward) or np.isinf(reward):
             print("[ERROR] Reward is NaN or Inf! Resetting to 0.")
@@ -192,7 +207,7 @@ class FleetManagerEnv(Env):
         # Reset counters and logs
         self.time_counter = 0
         self.req_id_counter = 0
-        self.active_requests = []
+        self.active_requests = deque()
         self.request_spawn_times = {}
         self.request_assign_times = {}
         self.completed_requests = []
@@ -351,68 +366,60 @@ class FleetManagerEnv(Env):
 
         # Remove assigned requests from active list
         assigned_ids = set(assignments.values())
-        self.active_requests = [
+        self.active_requests = deque(
             req for req in self.active_requests if req["id"] not in assigned_ids
-        ]
+        )
+        print(f"[POST-CLEANUP] Remaining active_requests: {[req['id'] for req in self.active_requests]}")
 
     
     @property
     def action_space(self):
-        # Each vehicle picks a request index (-1 for idle, 0–49 for request)
-        max_requests = 50
-        max_vehicles = 20
-        # Add 2 to handle -1 offset (shift range to 0–50 internally)
-        return MultiDiscrete([max_requests + 2] * self.num_vehicles)
+        # 0 = stay idle, 1 = serve the oldest unassigned request
+        return MultiDiscrete([2] * self.num_vehicles)
     
     def _apply_rl_actions(self, rl_actions):
         """
-        RL assigns each vehicle to a request index, or -1 to stay idle.
+        RL assigns vehicles to serve the oldest requests first (FIFO), or stay idle.
+        Each action is 0 (idle) or 1 (serve oldest available).
         """
-            
         print(f"[DEBUG] RL Actions received: {rl_actions}")
-        
+
         assignments = {}
-        
-        # DEBUG: Inspect request slots
-        # for idx, r in enumerate(self.request_slots):
-        #     print(f"[DEBUG] SLOT {idx}: {r['id'] if r else 'None'}")
-            
-        # Cleanup finished trips first
+
+        # Cleanup finished trips
         for veh_id, dropoff_time in list(self.manager.busy_until.items()):
             if dropoff_time <= self.time_counter:
                 print(f"[INFO] Vehicle {veh_id} is now idle.")
                 del self.manager.busy_until[veh_id]
                 del self.manager.active_trips[veh_id]
-            
+
         idle_vehicles = {
             vid: v for vid, v in self.vehicles.items()
             if self.manager.busy_until.get(vid, 0) <= self.time_counter
         }
-        
+
         print(f"[DEBUG] Idle vehicles: {list(idle_vehicles.keys())}")
 
         veh_ids = list(idle_vehicles.keys())
+        unassigned_requests = list(self.active_requests)  # FIFO: oldest at front
+        req_idx = 0
+
         for i, veh_id in enumerate(veh_ids):
             if i >= len(rl_actions):
                 break
+            if rl_actions[i] == 1:
+                if req_idx >= len(unassigned_requests):
+                    print(f"[SKIP] No more requests to assign.")
+                    break
+                req = unassigned_requests[req_idx]
+                req_idx += 1
 
-            req_idx = int(rl_actions[i]) - 1
-
-            # 🚨 Guard against invalid index
-            if not (0 <= req_idx < len(self.request_slots)):
-                print(f"[SKIP] Vehicle {veh_id} -> invalid req_idx {req_idx}, skipping")
-                continue
-
-            print(f"[DEBUG] Vehicle {veh_id} assigned to action {rl_actions[i]} -> req_idx {req_idx}")
-            req = self.request_slots[req_idx]
-            if req is not None:
                 assignments[veh_id] = req["id"]
                 self.request_assign_times[req["id"]] = self.time_counter
-                self.request_slots[req_idx] = None
 
                 veh_pos = idle_vehicles[veh_id]["pos"]
                 pickup_dist = ((veh_pos[0] - req["pos"][0])**2 + (veh_pos[1] - req["pos"][1])**2) ** 0.5
-                AVERAGE_SPEED = 10  # meters/sec
+                AVERAGE_SPEED = 10  # m/s
                 pickup_time = int(pickup_dist / AVERAGE_SPEED)
                 trip_duration = random.randint(20, 60)
                 dropoff_time = self.time_counter + pickup_time + trip_duration
@@ -424,15 +431,14 @@ class FleetManagerEnv(Env):
                 }
 
                 print(f"[RL Dispatch] Assigned {veh_id} to {req['id']} -> pickup in {pickup_time}s, drop-off at t={dropoff_time}")
-            else: 
-                print(f"[SKIP] Request index {req_idx} was empty.")
-                        
-        print(f"[DEBUG] Assignments from RL: {assignments}")
+            else:
+                print(f"[SKIP] Vehicle {veh_id} chose to stay idle")
 
+        print(f"[DEBUG] Assignments from RL: {assignments}")
         self.apply_actions(assignments)
         print(f"[FINAL DEBUG] RL assigned {len(assignments)} vehicles this step.")
-        
         return assignments
+
     
     def summarize_metrics(self):
         print("\n--- Simulation Summary ---")
