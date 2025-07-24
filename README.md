@@ -1,45 +1,66 @@
-<img src="docs/img/square_logo.png" align="right" width="25%"/>
+# Reinforcement Learning for Fleet Management in Urban Traffic
 
-[![Build Status](https://travis-ci.com/flow-project/flow.svg?branch=master)](https://travis-ci.com/flow-project/flow)
-[![Docs](https://readthedocs.org/projects/flow/badge)](http://flow.readthedocs.org/en/latest/)
-[![Coverage Status](https://coveralls.io/repos/github/flow-project/flow/badge.svg?branch=master)](https://coveralls.io/github/flow-project/flow?branch=master)
-[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/flow-project/flow/binder)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/flow-project/flow/blob/master/LICENSE.md)
+This repository contains the simulation framework and learning environment developed as part of a thesis project exploring reinforcement learning (RL) for centralized fleet management in urban traffic scenarios. Built on top of the [Flow](https://github.com/flow-project/flow) framework and the SUMO traffic simulator, the system extends standard Flow capabilities with a custom environment, agent logic, and dynamic demand modeling.
 
-# Flow
+---
 
-[Flow](https://flow-project.github.io/) is a computational framework for deep RL and control experiments for traffic microsimulation.
+## Overview
 
-See [our website](https://flow-project.github.io/) for more information on the application of Flow to several mixed-autonomy traffic scenarios. Other [results and videos](https://sites.google.com/view/ieee-tro-flow/home) are available as well.
+This project focuses on intelligent fleet coordination in dense, city-like traffic environments. It uses a modified **MiniCity** network to simulate realistic urban layouts, intersections, and demand zones. The goal is to train a centralized RL agent to optimize:
 
-# More information
+- Vehicle dispatching  
+- Ride assignment  
+- Proactive movements based on learned spatiotemporal demand patterns  
 
-- [Documentation](https://flow.readthedocs.org/en/latest/)
-- [Installation instructions](http://flow.readthedocs.io/en/latest/flow_setup.html)
-- [Tutorials](https://github.com/flow-project/flow/tree/master/tutorials)
-- [Binder Build (beta)](https://mybinder.org/v2/gh/flow-project/flow/binder)
+### Key Objectives
 
-# Technical questions
+- Maximize vehicle utilization  
+- Minimize passenger wait times  
+- Handle dynamic request streams with spatial and temporal variation  
+- Support both reactive assignment and proactive repositioning of idle vehicles  
 
-If you have a bug, please report it. Otherwise, join the [Flow Users group](https://join.slack.com/t/flow-users/shared_invite/enQtODQ0NDYxMTQyNDY2LTY1ZDVjZTljM2U0ODIxNTY5NTQ2MmUxMzYzNzc5NzU4ZTlmNGI2ZjFmNGU4YjVhNzE3NjcwZTBjNzIxYTg5ZmY) on Slack!  
+---
 
-# Getting involved
+## Key Features
 
-We welcome your contributions.
+### ✅ Custom Environment (`FleetManagerEnv`)
+A tailored Gym-compatible environment extending Flow’s base classes. Integrates request queues, trip lifecycle management, and vehicle-idle tracking.
 
-- Please report bugs and improvements by submitting [GitHub issue](https://github.com/flow-project/flow/issues).
-- Submit your contributions using [pull requests](https://github.com/flow-project/flow/pulls). Please use [this template](https://github.com/flow-project/flow/blob/master/.github/PULL_REQUEST_TEMPLATE.md) for your pull requests.
+### 🔁 Flexible Agent Interface
+Supports both non-RL control policies (e.g., heuristic-based) and RL policies trained using **stable-baselines3** and **RLlib**.
 
-# Citing Flow
+### 🔥 Demand Heatmap Encoding
+Observation space includes a dynamic 2D heatmap of demand distribution, enabling proactive fleet behavior and pre-positioning of idle vehicles.
 
-If you use Flow for academic research, you are highly encouraged to cite our paper:
+### 🏙️ Realistic City Network (MiniCity)
+Simulation is set in a city-style network with realistic road layouts, intersections, and demand zones, adapted from the Flow `minicity` network.
 
-C. Wu, A. Kreidieh, K. Parvate, E. Vinitsky, A. Bayen, "Flow: Architecture and Benchmarking for Reinforcement Learning in Traffic Control," CoRR, vol. abs/1710.05465, 2017. [Online]. Available: https://arxiv.org/abs/1710.05465
+### 🧪 Dual Training Modes
+- **Non-RL Mode:** Baseline comparisons with deterministic control (e.g., nearest vehicle matching).  
+- **RL Mode:** Agents trained using algorithms such as TD3 and PPO with either Stable-Baselines or RLlib.
 
-If you use the benchmarks, you are highly encouraged to cite our paper:
+---
 
-Vinitsky, E., Kreidieh, A., Le Flem, L., Kheterpal, N., Jang, K., Wu, F., ... & Bayen, A. M,  Benchmarks for reinforcement learning in mixed-autonomy traffic. In Conference on Robot Learning (pp. 399-409). Available: http://proceedings.mlr.press/v87/vinitsky18a.html
+## Project Structure
 
-# Contributors
+flow/ # Modified Flow source with custom env, network, and controllers
+exp_configs/ # Experiment configuration files for RL and non-RL experiments
+scripts/ # Utility scripts for training, testing, and logging
+training_data/ # TensorBoard logs, trained models, and evaluation outputs
 
-Flow is supported by the [Mobile Sensing Lab](http://bayen.eecs.berkeley.edu/) at UC Berkeley and Amazon AWS Machine Learning research grants. The contributors are listed in [Flow Team Page](https://flow-project.github.io/team.html).
+---
+
+## Visualization and Evaluation
+
+- Training statistics (e.g., reward, utilization, wait time) are visualized using **TensorBoard**
+- Evaluation logs and metrics are saved as `.csv` files for analysis
+- Models are checkpointed regularly to allow resumption or testing
+
+---
+
+## Acknowledgements
+
+This work builds upon the open-source [Flow](https://github.com/flow-project/flow) framework, developed by UC Berkeley and ICSI.  
+Traffic simulation is powered by [SUMO (Simulation of Urban MObility)](https://www.eclipse.org/sumo/).
+
+---
