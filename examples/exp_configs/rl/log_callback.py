@@ -5,12 +5,17 @@ class RewardLoggingCallback(BaseCallback):
     def __init__(self, verbose=0):
         super().__init__(verbose)
         self.episode_rewards = []
+        self.proactive_alignments = []
 
     def _on_step(self) -> bool:
         # Log rewards per step
         if self.locals.get("rewards"):
             self.episode_rewards.extend(self.locals["rewards"])
             self.logger.record("custom/reward_step_avg", np.mean(self.locals["rewards"]))
+            
+        env = self.training_env.envs[0]
+        if hasattr(env, "last_alignment"):
+            self.proactive_alignments.append(env.last_alignment)
         return True
 
     def _on_rollout_end(self):
@@ -19,6 +24,12 @@ class RewardLoggingCallback(BaseCallback):
             avg_reward = np.mean(self.episode_rewards)
             self.logger.record("custom/ep_rew_mean", avg_reward)
             self.episode_rewards = []
+            
+        # Log average proactive alignment
+        if self.proactive_alignments:
+            avg_alignment = np.mean(self.proactive_alignments)
+            self.logger.record("custom/avg_proactive_alignment", avg_alignment)
+            self.proactive_alignments = []
 
         # ✅ Log cumulative avg_wait_time over all completed requests this rollout
         env = self.training_env.envs[0]  # assumes single env

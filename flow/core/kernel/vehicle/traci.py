@@ -1190,7 +1190,7 @@ class TraCIVehicle(KernelVehicle):
                 angle=angle,
                 keepRoute=keep_route
             )
-            print(f"[MOVE] Vehicle {veh_id} moved to ({x:.1f}, {y:.1f})")
+            print(f"[TRACI MOVE] Vehicle {veh_id} moved to ({x:.1f}, {y:.1f})")
         except Exception as e:
             print(f"[ERROR] Failed to move {veh_id} to ({x}, {y}): {e}")
     

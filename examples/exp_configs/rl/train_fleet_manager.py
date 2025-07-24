@@ -32,10 +32,10 @@ def make_env():
                 lane_change_mode=0,
                 model="SL2015"
             ),
-            num_vehicles=15
+            num_vehicles=20
         )
 
-        env_params = EnvParams(additional_params={"num_vehicles": 15})
+        env_params = EnvParams(additional_params={"num_vehicles": 20})
         sim_params = SimParams()
         sim_params.render = False
         sim_params.sim_step = 0.1
@@ -78,10 +78,15 @@ model = PPO(
     env,
     verbose=1,
     tensorboard_log="./ppo_tensorboard/",
-    learning_rate=0.0001,
-    clip_range=0.1,
+    learning_rate=5e-5,
+    clip_range=0.08,
     ent_coef=0.01,
-    vf_coef=0.5
+    vf_coef=0.8,
+    clip_range_vf=0.2,
+    gamma=0.99,
+    n_epochs=10,
+    batch_size=64,
+    gae_lambda=0.95
 )
 
 model.learn(total_timesteps=50000, callback=callback)
