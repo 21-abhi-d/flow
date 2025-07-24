@@ -1177,3 +1177,20 @@ class TraCIVehicle(KernelVehicle):
         """See parent class."""
         # TODO : Brent
         return 0
+    
+    def move_to_xy(self, veh_id, x, y, angle=0.0, lane=0, keep_route=1):
+        """Moves a vehicle to the specified (x, y) coordinate using TraCI's moveToXY."""
+        try:
+            self.kernel_api.vehicle.moveToXY(
+                vehID=veh_id,
+                edgeID="",
+                lane=lane,
+                x=x,
+                y=y,
+                angle=angle,
+                keepRoute=keep_route
+            )
+            print(f"[TRACI MOVE] Vehicle {veh_id} moved to ({x:.1f}, {y:.1f})")
+        except Exception as e:
+            print(f"[ERROR] Failed to move {veh_id} to ({x}, {y}): {e}")
+    

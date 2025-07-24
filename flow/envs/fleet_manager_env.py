@@ -28,10 +28,42 @@ class FleetManagerEnv(Env):
         self.completed_requests = []
         self.request_slots = [None] * 50
         
-        self.num_vehicles = env_params.additional_params.get("num_vehicles", 15)
+        self.num_vehicles = env_params.additional_params.get("num_vehicles", 20)
         self.writer = SummaryWriter(log_dir="./ppo_tensorboard/")
-        
-        
+    
+    def move_vehicle(self, vehicle_id, direction, delta=20.0):
+        pos = self.k.vehicle.get_position(vehicle_id)
+
+        # Fallback if position is missing or scalar (e.g., lanepos only)
+        if not isinstance(pos, (tuple, list)):
+            pos = (float(pos), 0.0)
+
+        if len(pos) != 2:
+            print(f"[WARN] Cannot move vehicle {vehicle_id}: invalid position {pos}")
+            return
+
+        x, y = pos
+
+        if direction == 1:  # up (increase y)
+            y += delta
+        elif direction == 2:  # down
+            y -= delta
+        elif direction == 3:  # left
+            x -= delta
+        elif direction == 4:  # right
+            x += delta
+        elif direction == 0 or direction == -1:
+            # direction 0 or -1 = idle/no-op
+            return
+        else:
+            print(f"[WARN] Unknown direction {direction} for vehicle {vehicle_id}")
+            return
+
+        try:
+            self.k.vehicle.move_to_xy(vehicle_id, x, y)
+        except Exception as e:
+            print(f"[ERROR] Could not move {vehicle_id} to ({x:.1f}, {y:.1f}): {e}")
+            
     @property
     def observation_space(self):
         return Box(low=0.0, high=1e3, shape=(310,), dtype=np.float32)
@@ -157,27 +189,124 @@ class FleetManagerEnv(Env):
         avg_wait_time = sum(wait_times) / len(wait_times) if wait_times else 0
         num_assigned = len(assignments)
         
+        # --- Tracking total completions and assignments ---
+        if not hasattr(self, "total_assigned"):
+            self.total_assigned = 0
+            self.total_completed = 0
+
+        self.total_assigned += num_assigned
+        self.total_completed += completed_this_step
+
+        in_progress = len(self.manager.active_trips)
+        resolved_assignments = max(1, self.total_assigned - in_progress)
+        completion_rate = self.total_completed / resolved_assignments
+        
+        avg_completion_delay = (
+            np.mean([entry["total_time"] - entry["wait_time"] for entry in self.completed_requests])
+            if self.completed_requests else 0
+        )
+
+        # === TensorBoard Logging ===
+        self.writer.add_scalar("custom/total/assigned", self.total_assigned, self.time_counter)
+        self.writer.add_scalar("custom/total/completed", self.total_completed, self.time_counter)
+        self.writer.add_scalar("custom/total/completion_rate", completion_rate, self.time_counter)
+        self.writer.add_scalar("custom/total/avg_completion_delay", avg_completion_delay, self.time_counter)
+
+        # === Console Debug (optional) ===
+        print(f"[LOG] Total Assigned: {self.total_assigned} | Total Completed: {self.total_completed} | Completion Rate: {completion_rate:.2f} | Avg Completion Delay: {avg_completion_delay:.2f}")
+
+        
         self.writer.add_scalar("custom/avg_wait_time", avg_wait_time, self.time_counter)
 
+        # === Normalized Metrics ===
         normalized_completed = completed_this_step / 10.0
         normalized_assigned = num_assigned / 10.0
-        normalized_wait_time = avg_wait_time / 60.0  # ranges from ~2 to 3+
+        normalized_wait_time = avg_wait_time / 60.0
 
-        # Step 1: Base reward without wait-time penalty
-        base_reward = 1.0 * normalized_completed + 0.5 * normalized_assigned
+        # === Demand Grid (same as before) ===
+        grid_size = 10
+        grid_dim = 1000
+        cell_width = grid_dim / grid_size
 
-        # Step 2: Apply wait time constraint as a **multiplier penalty**
-        # If avg_wait_time > 150s, the multiplier decreases, squashing reward
-        if avg_wait_time > 150:
-            wait_multiplier = max(0.0, 1.0 - ((avg_wait_time - 150) / 60))  # drops from 1 to 0 as wait hits 210
+        demand_grid = np.zeros((grid_size, grid_size), dtype=np.float32)
+        for req in self.active_requests:
+            x, y = req["pos"]
+            row = min(int(y / cell_width), grid_size - 1)
+            col = min(int(x / cell_width), grid_size - 1)
+            demand_grid[row][col] += 1
+            
+        # === NEW: Track which idle vehicles are in high demand zones ===
+        self.aligned_vehicles = set()
+        for vid, data in self.vehicles.items():
+            if data["status"] == "idle":
+                x, y = data["pos"]
+                row = min(int(y / cell_width), grid_size - 1)
+                col = min(int(x / cell_width), grid_size - 1)
+                if demand_grid[row][col] >= demand_grid.max() * 0.8:  # Top 20% demand cells
+                    self.aligned_vehicles.add(vid)
+
+
+        alignment_score = 0
+        idle_vehicle_count = 0
+        for vid, data in self.vehicles.items():
+            if data["status"] == "idle":
+                x, y = data["pos"]
+                row = min(int(y / cell_width), grid_size - 1)
+                col = min(int(x / cell_width), grid_size - 1)
+                alignment_score += demand_grid[row][col]
+                idle_vehicle_count += 1
+
+        normalized_alignment = alignment_score / max(1, idle_vehicle_count * demand_grid.max())
+
+        # === Step 1: Base Reward - Increased weight for completions ===
+        base_reward = 1.5 * normalized_completed + 0.5 * normalized_assigned
+
+        # === Step 2: Wait Time Modifier - Trigger at lower threshold ===
+        if avg_wait_time > 90:
+            wait_multiplier = max(0.0, 1.0 - ((avg_wait_time - 90) / 40))  # slower decay
         else:
             wait_multiplier = 1.0
 
-        # Step 3: Compute total reward with wait time constraint
+        # === Step 3: Apply Wait Time Multiplier ===
         reward = base_reward * wait_multiplier
 
-        # Step 4 (optional): Add a small extra penalty for high wait time
-        reward -= 0.05 * normalized_wait_time
+        # === Step 4: Explicit Wait Time Penalty - downweighted to avoid overkill ===
+        reward -= 0.12 * normalized_wait_time  # less aggressive
+
+        # === Step 6: Idleness Penalty - use a sigmoid to avoid over-penalizing large fleets ===
+        # e.g., sigmoid(vehicles_idle/total) - baseline
+        total_vehicles = len(self.vehicles)
+        if total_vehicles > 0:
+            idle_ratio = idle_vehicle_count / total_vehicles
+            penalty_idle = 0.05 * (idle_ratio ** 2)
+            reward -= penalty_idle
+            
+        # === Step 7: Proximity-Based Match Reward ===
+        if num_assigned > 0:
+            normalized_proximity_score = self.proximity_matched / num_assigned
+        else:
+            normalized_proximity_score = 0
+
+        reward += 0.15 * normalized_proximity_score
+        
+        # === New: Reward successful proactive alignments ===
+        if len(self.aligned_vehicles) > 0:
+            alignment_conversion = self.proactive_matched / len(self.aligned_vehicles)
+        else:
+            alignment_conversion = 0.0
+
+        reward += 0.15 * alignment_conversion
+
+        # === Logging (for TensorBoard debugging) ===
+        self.writer.add_scalar("custom/reward_components/completed", normalized_completed, self.time_counter)
+        self.writer.add_scalar("custom/reward_components/assigned", normalized_assigned, self.time_counter)
+        self.writer.add_scalar("custom/reward_components/alignment", normalized_alignment, self.time_counter)
+        self.writer.add_scalar("custom/reward_components/wait_time", normalized_wait_time, self.time_counter)
+        self.writer.add_scalar("custom/reward_components/idle_penalty", penalty_idle, self.time_counter)
+        self.writer.add_scalar("custom/proximity_score", normalized_proximity_score, self.time_counter)
+
+        self.last_alignment = normalized_alignment
+        self.writer.add_scalar("custom/proactive_alignment", normalized_alignment, self.time_counter)
 
         if np.isnan(reward) or np.isinf(reward):
             print("[ERROR] Reward is NaN or Inf! Resetting to 0.")
@@ -374,19 +503,16 @@ class FleetManagerEnv(Env):
     
     @property
     def action_space(self):
-        # 0 = stay idle, 1 = serve the oldest unassigned request
-        return MultiDiscrete([2] * self.num_vehicles)
+        # 0 = stay, 1 = up, 2 = down, 3 = left, 4 = right, 5 = serve
+        return MultiDiscrete([6] * self.num_vehicles)
     
     def _apply_rl_actions(self, rl_actions):
-        """
-        RL assigns vehicles to serve the oldest requests first (FIFO), or stay idle.
-        Each action is 0 (idle) or 1 (serve oldest available).
-        """
         print(f"[DEBUG] RL Actions received: {rl_actions}")
-
         assignments = {}
+        # Track proactive matches (assigned when already near request)
+        self.proximity_matched = 0
+        self.proactive_matched = 0
 
-        # Cleanup finished trips
         for veh_id, dropoff_time in list(self.manager.busy_until.items()):
             if dropoff_time <= self.time_counter:
                 print(f"[INFO] Vehicle {veh_id} is now idle.")
@@ -401,16 +527,19 @@ class FleetManagerEnv(Env):
         print(f"[DEBUG] Idle vehicles: {list(idle_vehicles.keys())}")
 
         veh_ids = list(idle_vehicles.keys())
-        unassigned_requests = list(self.active_requests)  # FIFO: oldest at front
+        unassigned_requests = list(self.active_requests)
         req_idx = 0
 
         for i, veh_id in enumerate(veh_ids):
             if i >= len(rl_actions):
                 break
-            if rl_actions[i] == 1:
+
+            action = rl_actions[i]
+
+            if action == 5:
                 if req_idx >= len(unassigned_requests):
                     print(f"[SKIP] No more requests to assign.")
-                    break
+                    continue
                 req = unassigned_requests[req_idx]
                 req_idx += 1
 
@@ -419,8 +548,13 @@ class FleetManagerEnv(Env):
 
                 veh_pos = idle_vehicles[veh_id]["pos"]
                 pickup_dist = ((veh_pos[0] - req["pos"][0])**2 + (veh_pos[1] - req["pos"][1])**2) ** 0.5
-                AVERAGE_SPEED = 10  # m/s
-                pickup_time = int(pickup_dist / AVERAGE_SPEED)
+                # Count this as a proximity match if vehicle was close to the request
+                if pickup_dist < 50:  # You can tune this threshold
+                    self.proximity_matched += 1
+                # Count if aligned vehicle was successfully assigned
+                if hasattr(self, "aligned_vehicles") and veh_id in self.aligned_vehicles:
+                    self.proactive_matched += 1
+                pickup_time = int(pickup_dist / 10)
                 trip_duration = random.randint(20, 60)
                 dropoff_time = self.time_counter + pickup_time + trip_duration
 
@@ -430,7 +564,9 @@ class FleetManagerEnv(Env):
                     "dropoff_time": dropoff_time
                 }
 
-                print(f"[RL Dispatch] Assigned {veh_id} to {req['id']} -> pickup in {pickup_time}s, drop-off at t={dropoff_time}")
+                print(f"[RL Dispatch] Assigned {veh_id} to {req['id']} -> drop-off at {dropoff_time}")
+            elif action in [1, 2, 3, 4]:
+                self.move_vehicle(veh_id, direction=action)
             else:
                 print(f"[SKIP] Vehicle {veh_id} chose to stay idle")
 
