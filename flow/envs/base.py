@@ -20,6 +20,7 @@ from traci.exceptions import FatalTraCIError
 from traci.exceptions import TraCIException
 
 import sumolib
+import traci
 
 
 from flow.core.util import ensure_dir
@@ -505,11 +506,15 @@ class Env(gym.Env, metaclass=ABCMeta):
                     pos=pos,
                     speed=speed)
             except (FatalTraCIError, TraCIException):
-                # if a vehicle was not removed in the first attempt, remove it
-                # now and then reintroduce it
                 self.k.vehicle.remove(veh_id)
                 if self.simulator == 'traci':
-                    self.k.kernel_api.vehicle.remove(veh_id)  # FIXME: hack
+                    try:
+                        self.k.kernel_api.vehicle.remove(veh_id)  # <- protect this
+                    except traci.exceptions.TraCIException as e:
+                        if "is not known" in str(e):
+                            pass  # Vehicle was never added or already removed
+                        else:
+                            raise e
                 self.k.vehicle.add(
                     veh_id=veh_id,
                     type_id=type_id,
@@ -517,6 +522,7 @@ class Env(gym.Env, metaclass=ABCMeta):
                     lane=lane_index,
                     pos=pos,
                     speed=speed)
+
 
         # advance the simulation in the simulator by one step
         self.k.simulation.simulation_step()

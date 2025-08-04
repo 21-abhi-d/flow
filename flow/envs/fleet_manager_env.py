@@ -28,7 +28,7 @@ class FleetManagerEnv(Env):
         self.completed_requests = []
         self.request_slots = [None] * 50
         
-        self.num_vehicles = env_params.additional_params.get("num_vehicles", 20)
+        self.num_vehicles = env_params.additional_params.get("num_vehicles", 6)
         self.writer = SummaryWriter(log_dir="./ppo_tensorboard/")
     
     def move_vehicle(self, vehicle_id, direction, delta=20.0):

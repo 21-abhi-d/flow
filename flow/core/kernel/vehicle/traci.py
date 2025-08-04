@@ -1106,8 +1106,19 @@ class TraCIVehicle(KernelVehicle):
             # the case of network templates.
             route_id = 'route{}_0'.format(veh_id)
         else:
+            print("[DEBUG vehicle.add] Attempting to add vehicle:", veh_id)
+            print("[DEBUG vehicle.add] Provided edge:", edge)
+            print("[DEBUG vehicle.add] All route keys:", list(self.master_kernel.network.rts.keys()))
+            
+            if edge not in self.master_kernel.network.rts:
+                raise ValueError(f"[ERROR] Edge '{edge}' not found in available routes!")
+            
             num_routes = len(self.master_kernel.network.rts[edge])
             frac = [val[1] for val in self.master_kernel.network.rts[edge]]
+            
+            print("[DEBUG vehicle.add] Number of routes for edge:", num_routes)
+            print("[DEBUG vehicle.add] Probabilities (frac):", frac)
+            
             route_id = 'route{}_{}'.format(edge, np.random.choice(
                 [i for i in range(num_routes)], size=1, p=frac)[0])
 
